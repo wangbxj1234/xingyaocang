@@ -1,11 +1,9 @@
-"""手、工位运动、SigLIP 三条分开判。不把三个分做加权平均。"""
+"""无效片段只看手和画面动不动。不读 SigLIP。"""
 
 from __future__ import annotations
 
-from siglip_filter.classify import frame_label
 
-
-FUSION_LABELS = ("active_relevant", "idle_no_person", "present_but_unrelated", "uncertain")
+FUSION_LABELS = ("kept", "idle_no_person", "present_but_unrelated", "uncertain")
 
 
 def _covers(stamp: float, row: dict) -> bool:
@@ -38,12 +36,7 @@ def sample_decision(sample: dict, intervals: list[dict], temporal: dict) -> tupl
         return "uncertain", "absent_high_motion", motion
     if not present:
         return "uncertain", "no_hand_short", motion
-    label, reason, confidence = frame_label(sample, sample.get("siglip_view", "full"), temporal)
-    if label == "relevant":
-        return "active_relevant", reason, confidence
-    if label == "irrelevant":
-        return "present_but_unrelated", reason, confidence
-    return "uncertain", reason, confidence
+    return "kept", "hand_moving", motion
 
 
 def fuse_timeline(samples: list[dict], intervals: list[dict], duration: float, temporal: dict) -> list[dict]:

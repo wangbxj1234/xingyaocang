@@ -136,7 +136,6 @@ def main(argv=None) -> None:
     hands_p = sub.add_parser("hands", help="mark idle stretches from hands, not from SigLIP")
     hands_p.add_argument("--config", type=Path, required=True)
     hands_p.add_argument("--episodes", type=Path, required=True)
-    hands_p.add_argument("--siglip", action="append", required=True, help="name=output_dir")
     hands_p.add_argument("--out", type=Path, required=True)
     hands_p.add_argument("--report", type=Path)
     hands_p.add_argument("--focus", action="append", default=[], help="start:end seconds")
@@ -168,12 +167,8 @@ def main(argv=None) -> None:
         episodes = load_episodes(args.episodes)
         if len(episodes) != 1:
             raise SystemExit("hands currently runs one episode")
-        siglip_dirs = {}
-        for item in args.siglip:
-            name, folder = item.split("=", 1)
-            siglip_dirs[name] = folder
         cfg = FilterConfig.load(args.config)
-        summary = run_hands(cfg, episodes[0], siglip_dirs, args.out)
+        summary = run_hands(cfg, episodes[0], args.out)
         focus = []
         for item in args.focus:
             start, end = item.split(":")

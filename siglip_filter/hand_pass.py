@@ -1,8 +1,7 @@
-"""在已有的 SigLIP 分数上补人手和工位运动。不改原片，也不重训。"""
+"""按人手和画面动不动标无效片段。不改原片。"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -12,25 +11,6 @@ from siglip_filter.hands import HandDetector
 from siglip_filter.idle import idle_intervals, transition_to_absent, transition_to_present
 from siglip_filter.manifest import write_json, write_jsonl
 from siglip_filter.motion_roi import MotionRoi
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    rows = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
-    return rows
-
-
-def _nearest(rows: list[dict], stamp: float, slack: float = 2.5) -> dict | None:
-    best = None
-    best_distance = slack
-    for row in rows:
-        distance = abs(float(row["timestamp_s"]) - stamp)
-        if distance <= best_distance:
-            best = row
-            best_distance = distance
-    return best
 
 
 def _clock(seconds: float) -> str:
@@ -130,28 +110,7 @@ def reapply_peel(intervals: list[dict], context_s: float, duration: float) -> li
     return peeled
 
 
-def attach_siglip(samples: list[dict], siglip_rows: list[dict], view: str, motion_low: float) -> list[dict]:
-    attached = []
-    for sample in samples:
-        source = _nearest(siglip_rows, float(sample["timestamp_s"]))
-        row = dict(sample)
-        row["siglip_view"] = view
-        row["motion_low"] = motion_low
-        if source is None:
-            row["decode_ok"] = True
-            row["embedded"] = False
-            row["scores"] = {}
-        else:
-            row["decode_ok"] = bool(source.get("decode_ok", True))
-            row["embedded"] = bool(source.get("embedded", False))
-            row["black"] = bool(source.get("black", False))
-            row["scores"] = source.get("scores") or {}
-            row["siglip_motion"] = source.get("motion")
-        attached.append(row)
-    return attached
-
-
-def run_hands(cfg, episode: dict, siglip_dirs: dict, out_dir: Path) -> dict:
+def run_hands(cfg, episode: dict, out_dir: Path) -> dict:
     presence = dict(cfg.presence)
     if not presence.get("enabled"):
         raise ValueError("presence.enabled is false")
@@ -207,13 +166,12 @@ def run_hands(cfg, episode: dict, siglip_dirs: dict, out_dir: Path) -> dict:
     thumbs = _write_thumbs(out_dir, intervals, images, edge_images)
     write_jsonl(out_dir / "hands.jsonl", samples)
     write_json(out_dir / "idle.json", {"intervals": intervals, "coarse": coarse})
-    fused = {}
-    for name, folder in siglip_dirs.items():
-        rows = _read_jsonl(Path(folder) / "frames" / f"{episode['episode_id']}.jsonl")
-        attached = attach_siglip(samples, rows, "full", float(presence["motion_low"]))
-        segments = fuse_timeline(attached, intervals, float(episode["duration"]), cfg.temporal)
-        fused[name] = segments
-        write_jsonl(out_dir / f"fusion_{name}.jsonl", segments)
+    motion_low = float(presence["motion_low"])
+    for sample in samples:
+        sample["motion_low"] = motion_low
+    segments = fuse_timeline(samples, intervals, float(episode["duration"]), cfg.temporal)
+    fused = {"hands": segments}
+    write_jsonl(out_dir / "fusion_hands.jsonl", segments)
     payload = {
         "episode_id": episode["episode_id"],
         "duration": float(episode["duration"]),
@@ -256,7 +214,7 @@ def write_comparison(path: Path, episode: dict, summary: dict, focus: list[tuple
         "",
         "工位相机主要拍到的是手和前臂，不用人体框。检测器是 MediaPipe Hands。",
         "看不到手超过 5 秒，标 `idle_no_person`。手还在但画面不动超过 5 秒，标 `present_but_unrelated`。",
-        "原片不删。SigLIP 的 0.02 门槛没有改。",
+        "原片不删。无效片段不看 SigLIP。",
         "",
         f"- `{episode['episode_id']}`",
         f"- 时长 {float(episode['duration']):.1f} 秒",
@@ -295,23 +253,18 @@ def write_comparison(path: Path, episode: dict, summary: dict, focus: list[tuple
             lines.append(f"- {_clock(start)}–{_clock(end)}：对上 {text}")
         else:
             lines.append(f"- {_clock(start)}–{_clock(end)}：这段没有被标成空档")
-    lines.extend(["", "## 和原来的 SigLIP 对照", ""])
-    lines.append("原来两个模型整段都是 `uncertain`。下面是融合后的标签。")
-    lines.append("")
-    for name, segments in summary["fusion"].items():
-        lines.append(f"### {name}")
-        lines.append("")
-        lines.append("| 起 | 止 | 标签 | 原因 |")
-        lines.append("| --- | --- | --- | --- |")
+    lines.extend(["", "## 判定", ""])
+    lines.append("| 起 | 止 | 标签 | 原因 |")
+    lines.append("| --- | --- | --- | --- |")
+    for segments in summary["fusion"].values():
         for segment in segments:
-            if segment["label"] == "uncertain" and segment["reason"] not in ("absent_high_motion",):
-                if float(segment["end"]) - float(segment["start"]) < 20:
-                    continue
+            if segment["label"] not in ("idle_no_person", "present_but_unrelated"):
+                continue
             lines.append(
                 "| %s | %s | `%s` | %s |"
                 % (_clock(segment["start"]), _clock(segment["end"]), segment["label"], segment["reason"])
             )
-        lines.append("")
+    lines.append("")
     if summary.get("thumbs"):
         lines.extend(["## 切换附近的帧", ""])
         for thumb in summary["thumbs"]:

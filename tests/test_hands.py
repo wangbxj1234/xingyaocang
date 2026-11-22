@@ -79,16 +79,16 @@ class HandIdleTest(unittest.TestCase):
         segments = fuse_timeline(rows, intervals, 40, _temporal())
         labels = {row["label"] for row in segments}
         self.assertIn("idle_no_person", labels)
-        self.assertNotIn("active_relevant", labels)
+        self.assertNotIn("kept", labels)
 
-    def test_present_relevant_and_unrelated(self):
+    def test_moving_hands_are_kept_without_siglip(self):
         rows = [
-            sample(0, True, positive=0.08, negative=0.01, uncertain=0.01),
-            sample(10, True, positive=0.01, negative=0.08, uncertain=0.01),
+            sample(0, True, motion=0.1, positive=0.08, negative=0.01, uncertain=0.01),
+            sample(10, True, motion=0.1, positive=0.01, negative=0.08, uncertain=0.01),
         ]
         segments = fuse_timeline(rows, [], 20, _temporal())
-        self.assertEqual(segments[0]["label"], "active_relevant")
-        self.assertEqual(segments[1]["label"], "present_but_unrelated")
+        self.assertTrue(all(row["label"] == "kept" for row in segments))
+        self.assertTrue(all(row["reason"] == "hand_moving" for row in segments))
 
     def test_one_fps_edges(self):
         times = [13.0, 14.0, 15.0, 16.0]
