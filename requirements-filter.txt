@@ -1,0 +1,7 @@
+numpy>=1.24
+Pillow>=10
+PyYAML>=6
+scikit-learn>=1.3
+# 解 mp4 / avi 时安装其中一个：opencv-python-headless 或 av
+# mcap 还要仓库里的 requirements.txt（mcap、protobuf）
+# 真模型再装：torch、transformers>=4.49

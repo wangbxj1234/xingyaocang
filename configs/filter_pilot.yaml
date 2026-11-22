@@ -1,0 +1,56 @@
+# 试点。默认模型 google/siglip2-base-patch16-224。
+# 对照时可换成 google/siglip2-so400m-patch14-384，并把 sample.image_size 改成 384。
+# 余弦相似度不是概率。低运动本身不会标成无关。
+# 总时长超过 pilot.max_hours 会拒绝。验证报告里有 relevant_segment_recall 之后，
+# 才允许 python -m siglip_filter run --allow-full --validation report.json。
+
+model:
+  name: google/siglip2-base-patch16-224
+  dtype: auto
+  batch_size: 32
+  device: auto
+
+sample:
+  interval_s: 5
+  image_size: 224
+
+roi:
+  enabled: true
+  x: 0.12
+  y: 0.08
+  w: 0.76
+  h: 0.78
+
+quality:
+  black_mean_max: 12
+  sharp_var_min: 5
+  duplicate_mad_max: 1.5
+  frozen_ssim_min: 0.985
+  blur_window_ratio: 0.8
+
+temporal:
+  window_s: 30
+  relevant_margin: 0.02
+  irrelevant_margin: 0.02
+  low_confidence_margin: 0.02
+  min_consecutive_irrelevant: 2
+  boundary_context_s: 3
+  smooth: 3
+  idle_motion_max: 0.02
+  decision_view: full
+
+classify:
+  mode: zero_shot
+  features: both
+  split: episode
+  val_fraction: 0.2
+  seed: 1
+  classifier_dir: null
+
+pilot:
+  max_hours: 20
+
+workers: 2
+
+annotation:
+  target_windows: 500

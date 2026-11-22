@@ -3,3 +3,4 @@ __pycache__/
 frames/
 *.mcap
 *.mp4
+filter_out/
