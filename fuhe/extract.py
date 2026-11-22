@@ -1,17 +1,12 @@
-"""抽头顶相机，重采样到 15 fps。
-
-iter_frames 在 episode_rot180 为真时已经把画面转了 180°。这里保存的就是转完的帧，
-后面编码不再转，避免和 360 秒那次脚本一样转两遍。
-"""
+"""抽一路相机的 jpeg，按最近邻重采样到 15 fps。不转画面。"""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import sys
 from pathlib import Path
 
+from fuhe.mcap_rgb import iter_rgb
 from fuhe.preprocess import keep_spans
 
 FPS = 15
@@ -35,28 +30,15 @@ def main() -> None:
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--mcap", type=Path, required=True)
     parser.add_argument("--workdir", type=Path, required=True)
+    parser.add_argument("--rot180", action="store_true")
     args = parser.parse_args()
-
-    wbx1 = os.environ.get("WBX1", "/mnt/cpfs/wbx/code/wbx1")
-    sys.path.insert(0, wbx1)
-    import numpy as np
-    from PIL import Image
-    from extract.mount_orient import episode_rot180
-    from extract.qrdf_io import iter_frames
-    from extract.qrdf_topics import TopicMap
 
     meta = load_metadata(args.metadata)
     duration_s = float(meta["timing"]["duration_s"])
     epoch_ns = int(meta["timing"]["start_timestamp_ns"])
     spans = keep_spans(duration_s)
     mount = topic_prefix(meta)
-    topics = TopicMap(
-        rgb=f"/camera/{mount}/rgb",
-        depth=f"/camera/{mount}/depth",
-        rgb_info=f"/camera/{mount}/camera_info",
-        depth_info=f"/camera/{mount}/depth_camera_info",
-        camera_pose=f"/observation/pose/{mount}_camera",
-    )
+    topic = f"/camera/{mount}/rgb"
     work = args.workdir
     work.mkdir(parents=True, exist_ok=True)
     (work / "spans.json").write_text(
@@ -72,29 +54,19 @@ def main() -> None:
     n_frames = int(round((end_s - start_s) * FPS))
     frames = work / "frames"
     frames.mkdir(exist_ok=True)
-    rotated = bool(episode_rot180(args.mcap))
-    print("ROT180", int(rotated), "mount", mount, "frames", n_frames, flush=True)
+    print("ROT180", int(args.rot180), "mount", mount, "frames", n_frames, flush=True)
 
     prev = None
     slot = 0
     seen = 0
 
-    def take(rgb):
-        image = Image.fromarray(np.ascontiguousarray(rgb), mode="RGB")
+    def take(image):
         image.save(frames / f"{slot:06d}.jpg", quality=95)
 
-    for frame in iter_frames(
-        args.mcap,
-        topics=topics,
-        start_s=start_s,
-        end_s=end_s,
-        epoch_ns=epoch_ns,
+    for t_abs, image in iter_rgb(
+        args.mcap, topic, epoch_ns=epoch_ns, start_s=start_s, end_s=end_s,
     ):
-        t = float(frame.timestamp_s) - start_s
-        if t < 0:
-            continue
-        if t > end_s - start_s:
-            break
+        t = t_abs - start_s
         seen += 1
         if prev is not None:
             while slot < n_frames:
@@ -104,7 +76,7 @@ def main() -> None:
                     slot += 1
                 else:
                     break
-        prev = (t, frame.rgb)
+        prev = (t, image)
         if seen % 300 == 0:
             print(f"src {seen} slot {slot} t {t:.2f}", flush=True)
     if prev is None:
@@ -113,7 +85,7 @@ def main() -> None:
         take(prev[1])
         slot += 1
     out = {
-        "rotated_180": rotated,
+        "rotated_180": bool(args.rot180),
         "source_frames": seen,
         "slots": slot,
         "fps": FPS,
@@ -122,6 +94,7 @@ def main() -> None:
         "epoch_ns": epoch_ns,
         "source": meta["episode_id"],
         "mount": mount,
+        "topic": topic,
     }
     (work / "extract_meta.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     print("EXTRACT_DONE", json.dumps(out), flush=True)

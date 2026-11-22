@@ -1,4 +1,4 @@
-"""从已经转正的帧按帧号编码重叠块。不再 hflip,vflip。"""
+"""从抽出的帧按帧号编码重叠块。只有抽帧时带了 --rot180 才 hflip,vflip。"""
 
 from __future__ import annotations
 
@@ -30,9 +30,10 @@ def main() -> None:
             "-start_number", str(start_frame),
             "-i", str(work / "frames" / "%06d.jpg"),
             "-frames:v", str(count),
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
-            str(dest),
         ]
+        if meta.get("rotated_180"):
+            cmd += ["-vf", "hflip,vflip"]
+        cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", str(dest)]
         subprocess.check_call(cmd)
         written.append({"start_s": seconds(start), "end_s": seconds(end), "path": dest.name, "frames": count})
         print(f"BLOCK_MP4 {index} frames {start_frame}+{count}", flush=True)
