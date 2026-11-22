@@ -37,19 +37,27 @@ class HandIdleTest(unittest.TestCase):
         outside = bbox_overlap([60, 10, 90, 40], LEFT, 100, 100)
         self.assertEqual(outside, 0.0)
 
-    def test_short_absence_is_not_idle(self):
-        rows = [sample(t, False) for t in (0, 5)]
-        found = idle_intervals(rows, 30, _cfg())
-        self.assertEqual(found, [])
+    def test_one_sample_is_not_idle(self):
+        rows = [sample(0, False)]
+        self.assertEqual(idle_intervals(rows, 30, _cfg()), [])
 
-    def test_fifteen_seconds_without_a_hand_is_idle(self):
-        rows = [sample(t, False) for t in (0, 5, 10, 15, 20)]
-        found = idle_intervals(rows, 40, _cfg())
+    def test_five_seconds_without_a_hand_is_idle(self):
+        rows = [sample(t, False, motion=0.2) for t in (0, 5)]
+        found = idle_intervals(rows, 30, _cfg())
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["label"], "idle_no_person")
-        self.assertAlmostEqual(found[0]["raw_start"], 0.0)
-        self.assertAlmostEqual(found[0]["start"], 5.0)
-        self.assertAlmostEqual(found[0]["end"], 20.0)
+        self.assertEqual(found[0]["reason"], "no_hand")
+        self.assertAlmostEqual(found[0]["start"], 0.0)
+        self.assertAlmostEqual(found[0]["end"], 10.0)
+
+    def test_still_hands_are_invalid(self):
+        rows = [sample(t, True, motion=0.001, positive=0.2) for t in (0, 5, 10)]
+        found = idle_intervals(rows, 30, _cfg())
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["label"], "present_but_unrelated")
+        self.assertEqual(found[0]["reason"], "low_motion")
+        segments = fuse_timeline(rows, found, 20, _temporal())
+        self.assertTrue(all(row["label"] == "present_but_unrelated" for row in segments))
 
     def test_one_false_hand_does_not_split(self):
         rows = [sample(t, False) for t in range(0, 45, 5)]
@@ -59,12 +67,11 @@ class HandIdleTest(unittest.TestCase):
         found = idle_intervals(rows, 50, _cfg())
         self.assertEqual(len(found), 1)
 
-    def test_moving_empty_station_stays_uncertain(self):
-        rows = [sample(t, False, motion=0.2) for t in range(0, 40, 5)]
-        self.assertEqual(idle_intervals(rows, 50, _cfg()), [])
-        segments = fuse_timeline(rows, [], 40, _temporal())
-        self.assertTrue(all(row["label"] == "uncertain" for row in segments))
-        self.assertTrue(any(row["reason"] == "absent_high_motion" for row in segments))
+    def test_short_moving_gap_stays_uncertain(self):
+        rows = [sample(0, False, motion=0.2)]
+        self.assertEqual(idle_intervals(rows, 20, _cfg()), [])
+        segments = fuse_timeline(rows, [], 10, _temporal())
+        self.assertEqual(segments[0]["reason"], "absent_high_motion")
 
     def test_idle_overrides_siglip(self):
         rows = [sample(t, False, positive=0.2) for t in range(0, 40, 5)]
@@ -95,10 +102,10 @@ class HandIdleTest(unittest.TestCase):
 def _cfg():
     return {
         "sample_interval_s": 5,
-        "absence_confirm_s": 15,
+        "absence_confirm_s": 5,
         "motion_low": 0.02,
-        "boundary_context_s": 5,
-        "bridge_s": 10,
+        "boundary_context_s": 0,
+        "bridge_s": 5,
     }
 
 

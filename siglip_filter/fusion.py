@@ -8,20 +8,29 @@ from siglip_filter.classify import frame_label
 FUSION_LABELS = ("active_relevant", "idle_no_person", "present_but_unrelated", "uncertain")
 
 
+def _covers(stamp: float, row: dict) -> bool:
+    if float(row["start"]) - 1e-9 <= stamp < float(row["end"]) - 1e-9:
+        return True
+    return abs(stamp - float(row["end"])) <= 1e-6
+
+
 def _in_idle(stamp: float, intervals: list[dict]) -> dict | None:
-    for row in intervals:
-        if float(row["start"]) - 1e-9 <= stamp < float(row["end"]) - 1e-9:
+    hits = [row for row in intervals if _covers(stamp, row)]
+    for row in hits:
+        if row.get("label") == "idle_no_person":
             return row
-        if abs(stamp - float(row["end"])) <= 1e-6:
-            return row
-    return None
+    return hits[0] if hits else None
 
 
 def sample_decision(sample: dict, intervals: list[dict], temporal: dict) -> tuple[str, str, float]:
     stamp = float(sample["timestamp_s"])
     idle = _in_idle(stamp, intervals)
     if idle is not None:
-        return "idle_no_person", "no_hand_low_motion", float(idle.get("confidence") or 1.0)
+        return (
+            str(idle.get("label") or "idle_no_person"),
+            str(idle.get("reason") or "no_hand"),
+            float(idle.get("confidence") or 1.0),
+        )
     present = bool(sample.get("hand_present_in_work_area"))
     motion = float(sample.get("motion_score") or 0.0)
     motion_low = float(sample.get("motion_low", temporal.get("motion_low", 0.02)))

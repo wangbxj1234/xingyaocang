@@ -1,4 +1,4 @@
-"""连续没有手，并且工位几乎不动，才记为空档。"""
+"""看不到手，或者画面停住，超过 5 秒都记成无效。原片不删。"""
 
 from __future__ import annotations
 
@@ -27,32 +27,20 @@ def bridge_gaps(samples: list[dict], bridge_s: float) -> list[dict]:
     return rows
 
 
-def idle_intervals(samples: list[dict], duration: float, cfg: dict) -> list[dict]:
-    """返回削过边界的空档。raw_start 是第一帧确认没有手的时间。"""
-    if not samples:
-        return []
+def _collect(rows: list[dict], duration: float, cfg: dict, keep, label: str, reason: str) -> list[dict]:
     interval = float(cfg.get("sample_interval_s", 5))
     confirm = float(cfg["absence_confirm_s"])
-    motion_low = float(cfg["motion_low"])
     context = float(cfg["boundary_context_s"])
-    bridged = bridge_gaps(samples, float(cfg.get("bridge_s", 10)))
     found = []
     index = 0
-    while index < len(bridged):
-        row = bridged[index]
-        moving = float(row.get("motion_score") or 0.0) > motion_low
-        if row.get("hand_present_in_work_area") or moving:
+    while index < len(rows):
+        if not keep(rows[index]):
             index += 1
             continue
         start = index
-        while index < len(bridged):
-            current = bridged[index]
-            if current.get("hand_present_in_work_area"):
-                break
-            if float(current.get("motion_score") or 0.0) > motion_low:
-                break
+        while index < len(rows) and keep(rows[index]):
             index += 1
-        quiet = bridged[start:index]
+        quiet = rows[start:index]
         if len(quiet) < 2:
             continue
         raw_start = float(quiet[0]["timestamp_s"])
@@ -69,13 +57,39 @@ def idle_intervals(samples: list[dict], duration: float, cfg: dict) -> list[dict
                 "raw_end": raw_end,
                 "start": peeled_start,
                 "end": peeled_end,
-                "label": "idle_no_person",
-                "reason": "no_hand_low_motion",
+                "label": label,
+                "reason": reason,
                 "confidence": 1.0,
                 "motion": sum(float(row.get("motion_score") or 0.0) for row in quiet) / len(quiet),
             }
         )
     return found
+
+
+def idle_intervals(samples: list[dict], duration: float, cfg: dict) -> list[dict]:
+    """超过确认时长的无效段。看不到手是一段，手还在但画面不动是另一段。"""
+    if not samples:
+        return []
+    motion_low = float(cfg["motion_low"])
+    bridged = bridge_gaps(samples, float(cfg.get("bridge_s", 10)))
+    absent = _collect(
+        bridged,
+        duration,
+        cfg,
+        lambda row: not row.get("hand_present_in_work_area"),
+        "idle_no_person",
+        "no_hand",
+    )
+    still = _collect(
+        bridged,
+        duration,
+        cfg,
+        lambda row: bool(row.get("hand_present_in_work_area"))
+        and float(row.get("motion_score") or 0.0) <= motion_low,
+        "present_but_unrelated",
+        "low_motion",
+    )
+    return absent + still
 
 
 def transition_to_absent(times: list[float], present: list[bool]) -> float | None:
