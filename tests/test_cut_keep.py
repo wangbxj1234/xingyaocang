@@ -1,6 +1,6 @@
 import unittest
 
-from siglip_filter.cut_keep import kept_ranges
+from siglip_filter.cut_keep import kept_ranges, segment_record
 
 
 class CutKeepTest(unittest.TestCase):
@@ -14,6 +14,15 @@ class CutKeepTest(unittest.TestCase):
 
     def test_everything_invalid(self):
         self.assertEqual(kept_ranges([{"start": 0.0, "end": 10.0}], 10.0), [])
+
+    def test_kept_pieces_stay_separate_segments(self):
+        ranges = kept_ranges([{"start": 5.0, "end": 8.0}], 10.0)
+        rows = [segment_record(i, start, end, 10, 15.0) for i, (start, end) in enumerate(ranges)]
+        self.assertEqual([row["file"] for row in rows], ["seg_000.mp4", "seg_001.mp4"])
+        self.assertEqual(rows[0]["src_end"], 5.0)
+        self.assertEqual(rows[1]["src_start"], 8.0)
+        self.assertNotIn("dst_start", rows[0])
+        self.assertNotIn("dst_end", rows[1])
 
 
 if __name__ == "__main__":

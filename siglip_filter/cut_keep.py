@@ -1,6 +1,6 @@
-"""Cut invalid spans from one episode and splice the kept camera frames.
+"""Cut invalid spans and write each kept piece as its own segment.
 
-Originals stay where they are. The spliced file is a new mp4.
+Originals stay where they are. Kept pieces are not concatenated.
 """
 
 from __future__ import annotations
@@ -133,18 +133,106 @@ def _ffmpeg(fps: float, out_path: Path) -> subprocess.Popen:
     )
 
 
-def write_kept_mp4(episode: dict, ranges: list[tuple[float, float]], out_path: Path) -> dict:
+def segment_record(index: int, start: float, end: float, frames: int, fps: float) -> dict:
+    """One kept piece. There is no timeline that joins it to the next piece."""
+    return {
+        "seg": index,
+        "file": "seg_%03d.mp4" % index,
+        "src_start": start,
+        "src_end": end,
+        "frames": frames,
+        "duration_s": frames / fps if fps else 0.0,
+    }
+
+
+def _start_ffmpeg(fps: float, path: Path, pending: list[bytes]) -> tuple[subprocess.Popen, int]:
+    proc = _ffmpeg(fps, path)
+    assert proc.stdin is not None
+    for blob in pending:
+        proc.stdin.write(blob)
+    return proc, len(pending)
+
+
+def _finish_segment(writer: dict, fps: float) -> tuple[dict | None, float]:
+    proc = writer["proc"]
+    if proc is None:
+        if not writer["pending"]:
+            return None, fps
+        if fps <= 0:
+            fps = _infer_fps(writer["times"])
+        proc, writer["frames"] = _start_ffmpeg(fps, writer["path"], writer["pending"])
+        writer["proc"] = proc
+        writer["pending"] = []
+    assert proc.stdin is not None
+    proc.stdin.close()
+    code = proc.wait()
+    if writer["frames"] == 0:
+        writer["path"].unlink(missing_ok=True)
+        return None, fps
+    if code != 0:
+        raise RuntimeError(f"ffmpeg exited {code} for {writer['path'].name}")
+    return segment_record(writer["seg"], writer["src_start"], writer["src_end"], writer["frames"], fps), fps
+
+
+def write_segments(episode: dict, ranges: list[tuple[float, float]], out_dir: Path) -> tuple[list[dict], float]:
+    """Write one mp4 per kept range. Ranges are not concatenated."""
     from fuhe.mcap_rgb import iter_jpeg
 
+    if not ranges:
+        return [], float(episode.get("fps") or 0)
     fps = float(episode.get("fps") or 0)
     topic = episode.get("topic") or f"/camera/{episode.get('mount') or 'head'}/rgb"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    proc = None
-    pending: list[bytes] = []
-    times: list[float] = []
-    frames = 0
+    out_dir.mkdir(parents=True, exist_ok=True)
+    segments: list[dict] = []
+    writer: dict | None = None
     index = 0
-    code = 0
+
+    def open_writer(range_index: int) -> dict:
+        start, end = ranges[range_index]
+        seg = len(segments)
+        path = out_dir / ("seg_%03d.mp4" % seg)
+        proc = None
+        if fps > 0:
+            proc = _ffmpeg(fps, path)
+        return {
+            "seg": seg,
+            "range_index": range_index,
+            "path": path,
+            "proc": proc,
+            "pending": [],
+            "times": [],
+            "frames": 0,
+            "src_start": start,
+            "src_end": end,
+        }
+
+    def push(blob: bytes, stamp: float) -> None:
+        nonlocal fps, writer
+        assert writer is not None
+        if fps <= 0:
+            writer["pending"].append(blob)
+            writer["times"].append(stamp)
+            if len(writer["times"]) >= 8:
+                fps = _infer_fps(writer["times"])
+                writer["proc"], writer["frames"] = _start_ffmpeg(fps, writer["path"], writer["pending"])
+                writer["pending"] = []
+            return
+        if writer["proc"] is None:
+            writer["proc"], _ = _start_ffmpeg(fps, writer["path"], [])
+        assert writer["proc"].stdin is not None
+        writer["proc"].stdin.write(blob)
+        writer["frames"] += 1
+
+    def close_writer() -> None:
+        nonlocal fps, writer
+        if writer is None:
+            return
+        current = writer
+        writer = None
+        row, fps = _finish_segment(current, fps)
+        if row is not None:
+            segments.append(row)
+
     try:
         for stamp, blob in iter_jpeg(
             Path(episode["video_path"]),
@@ -155,41 +243,15 @@ def write_kept_mp4(episode: dict, ranges: list[tuple[float, float]], out_path: P
         ):
             inside, index = _in_kept(stamp, ranges, index)
             if not inside:
+                close_writer()
                 continue
-            if proc is None and fps <= 0:
-                pending.append(blob)
-                times.append(float(stamp))
-                if len(times) >= 8:
-                    fps = _infer_fps(times)
-                    proc = _ffmpeg(fps, out_path)
-                    assert proc.stdin is not None
-                    for item in pending:
-                        proc.stdin.write(item)
-                    frames += len(pending)
-                    pending = []
-                continue
-            if proc is None:
-                proc = _ffmpeg(fps, out_path)
-            assert proc.stdin is not None
-            proc.stdin.write(blob)
-            frames += 1
+            if writer is None or writer["range_index"] != index:
+                close_writer()
+                writer = open_writer(index)
+            push(blob, float(stamp))
     finally:
-        if proc is None and pending:
-            fps = _infer_fps(times)
-            proc = _ffmpeg(fps, out_path)
-            assert proc.stdin is not None
-            for item in pending:
-                proc.stdin.write(item)
-            frames += len(pending)
-        if proc is not None and proc.stdin is not None:
-            proc.stdin.close()
-            code = proc.wait()
-    if frames == 0:
-        out_path.unlink(missing_ok=True)
-        return {"frames": 0, "fps": fps, "duration_s": 0.0}
-    if code != 0:
-        raise RuntimeError(f"ffmpeg exited {code} for {episode['episode_id']}")
-    return {"frames": frames, "fps": fps, "duration_s": frames / fps}
+        close_writer()
+    return segments, fps
 
 
 def _oss(cfg: str, args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -214,7 +276,11 @@ def upload(local: Path, url: str) -> None:
 
 
 def already_done(episode_id: str) -> bool:
-    return object_size(f"{DEST_ROOT}/{episode_id}/done.json") is not None
+    url = f"{DEST_ROOT}/{episode_id}/done.json"
+    if object_size(url) is None:
+        return False
+    result = _oss(WRITE_CFG, ["cat", url], check=False)
+    return result.returncode == 0 and '"layout": "segments"' in result.stdout
 
 
 def dest_for(episode_id: str) -> str:
@@ -234,33 +300,19 @@ def process_episode(cfg, episode: dict, work: Path) -> dict:
     try:
         _samples, intervals = detect_intervals(cfg, episode)
         ranges = kept_ranges(intervals, float(episode["duration"]))
-        mapped = []
-        cursor = 0.0
-        for start, end in ranges:
-            span = end - start
-            mapped.append(
-                {
-                    "src_start": start,
-                    "src_end": end,
-                    "dst_start": cursor,
-                    "dst_end": cursor + span,
-                }
-            )
-            cursor += span
-        mp4 = work / "kept.mp4"
-        video = {"frames": 0, "fps": float(episode.get("fps") or 0), "duration_s": 0.0}
-        if ranges:
-            video = write_kept_mp4(episode, ranges, mp4)
+        segments, fps = write_segments(episode, ranges, work)
+        kept_s = sum(float(row["duration_s"]) for row in segments)
+        frames = sum(int(row["frames"]) for row in segments)
         payload = {
             "episode_id": episode["episode_id"],
             "task": episode.get("task"),
             "source": prefix + "data.mcap",
             "topic": episode.get("topic"),
-            "fps": video["fps"],
+            "fps": fps,
             "src_duration_s": float(episode["duration"]),
-            "kept_duration_s": video["duration_s"],
-            "frames": video["frames"],
-            "kept": mapped,
+            "kept_duration_s": kept_s,
+            "frames": frames,
+            "segments": segments,
             "invalid": [
                 {
                     "start": float(row["start"]),
@@ -276,20 +328,31 @@ def process_episode(cfg, episode: dict, work: Path) -> dict:
         spans.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         folder = dest_for(episode["episode_id"])
         upload(spans, folder + "/spans.json")
-        if video["frames"]:
-            upload(mp4, folder + "/kept.mp4")
+        for row in segments:
+            upload(work / row["file"], folder + "/" + row["file"])
         done = work / "done.json"
-        done.write_text(json.dumps({"episode_id": episode["episode_id"], "frames": video["frames"]}), encoding="utf-8")
+        done.write_text(
+            json.dumps(
+                {
+                    "episode_id": episode["episode_id"],
+                    "layout": "segments",
+                    "segments": len(segments),
+                    "frames": frames,
+                }
+            ),
+            encoding="utf-8",
+        )
         upload(done, folder + "/done.json")
         print(
-            "CUT done %s kept %.0fs invalid %d wall %.0fs"
-            % (episode["episode_id"], video["duration_s"], len(intervals), payload["wall_s"]),
+            "CUT done %s segs %d kept %.0fs invalid %d wall %.0fs"
+            % (episode["episode_id"], len(segments), kept_s, len(intervals), payload["wall_s"]),
             flush=True,
         )
         return payload
     finally:
         local_mcap.unlink(missing_ok=True)
-        (work / "kept.mp4").unlink(missing_ok=True)
+        for path in work.glob("seg_*.mp4"):
+            path.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> None:
