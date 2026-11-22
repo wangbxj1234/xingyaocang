@@ -4,3 +4,4 @@ frames/
 *.mcap
 *.mp4
 filter_out/
+hand_landmarker.task

@@ -25,6 +25,7 @@ class FilterConfig:
     pilot_max_hours: float
     workers: int
     annotation_windows: int
+    presence: dict
     raw: dict
 
     @classmethod
@@ -55,6 +56,8 @@ class FilterConfig:
         workers = int(raw.get("workers", 1))
         if workers < 1:
             raise ValueError("workers must be >= 1")
+        presence = dict(raw.get("presence") or {})
+        presence.setdefault("enabled", False)
         return cls(
             model_name=str(model["name"]),
             model_dtype=str(model.get("dtype", "auto")),
@@ -69,6 +72,7 @@ class FilterConfig:
             pilot_max_hours=float(raw["pilot"]["max_hours"]),
             workers=workers,
             annotation_windows=int(raw.get("annotation", {}).get("target_windows", 500)),
+            presence=presence,
             raw=raw,
         )
 
@@ -87,7 +91,7 @@ class FilterConfig:
         }
 
     def decision_payload(self) -> dict:
-        return {
+        payload = {
             "model": self.model_name,
             "sample": self.sample_payload(),
             "quality": self.quality,
@@ -95,6 +99,11 @@ class FilterConfig:
             "classify": self.classify,
             "prompts": PROMPTS_VERSION,
         }
+        if self.presence.get("enabled"):
+            payload["presence"] = {
+                key: value for key, value in self.presence.items() if key != "model_path"
+            }
+        return payload
 
     def sample_hash(self) -> str:
         return _hash(self.sample_payload())

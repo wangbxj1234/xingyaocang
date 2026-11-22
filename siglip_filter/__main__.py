@@ -133,6 +133,14 @@ def main(argv=None) -> None:
     serve_p.add_argument("--out", type=Path, required=True)
     serve_p.add_argument("--port", type=int, default=8765)
 
+    hands_p = sub.add_parser("hands", help="mark idle stretches from hands, not from SigLIP")
+    hands_p.add_argument("--config", type=Path, required=True)
+    hands_p.add_argument("--episodes", type=Path, required=True)
+    hands_p.add_argument("--siglip", action="append", required=True, help="name=output_dir")
+    hands_p.add_argument("--out", type=Path, required=True)
+    hands_p.add_argument("--report", type=Path)
+    hands_p.add_argument("--focus", action="append", default=[], help="start:end seconds")
+
     args = parser.parse_args(argv)
     if args.cmd == "run":
         episodes = load_episodes(args.episodes)
@@ -153,6 +161,30 @@ def main(argv=None) -> None:
         return
     if args.cmd == "serve":
         serve(args.out, args.port)
+        return
+    if args.cmd == "hands":
+        from siglip_filter.hand_pass import run_hands, write_comparison
+
+        episodes = load_episodes(args.episodes)
+        if len(episodes) != 1:
+            raise SystemExit("hands currently runs one episode")
+        siglip_dirs = {}
+        for item in args.siglip:
+            name, folder = item.split("=", 1)
+            siglip_dirs[name] = folder
+        cfg = FilterConfig.load(args.config)
+        summary = run_hands(cfg, episodes[0], siglip_dirs, args.out)
+        focus = []
+        for item in args.focus:
+            start, end = item.split(":")
+            focus.append((float(start), float(end)))
+        if args.report:
+            write_comparison(args.report, episodes[0], summary, focus)
+        print(
+            f"HANDS {episodes[0]['episode_id']} idle {len(summary['intervals'])} "
+            f"frames {summary['n_frames']} with_hand {summary['n_hands']}",
+            flush=True,
+        )
         return
     raise SystemExit(f"unknown command {args.cmd}")
 
