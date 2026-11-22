@@ -20,6 +20,17 @@ from fuhe.chain_math import (
     seconds,
 )
 
+H20_BYTES = 80 * 1024 ** 3
+
+
+def gpu_fits(count: int, biggest_bytes: int) -> bool:
+    """One 80GB-class GPU holds both models. 24GB cards still need three."""
+    if count < 1:
+        return False
+    if biggest_bytes >= H20_BYTES:
+        return True
+    return count == 3
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -32,8 +43,10 @@ def main() -> None:
     from batch_utils.models import Session
     from batch_utils.pipeline import caption_single, segment
 
-    if torch.cuda.device_count() != 3:
-        raise SystemExit(f"expected 3 visible GPUs, saw {torch.cuda.device_count()}")
+    visible = torch.cuda.device_count()
+    biggest = max((torch.cuda.get_device_properties(i).total_memory for i in range(visible)), default=0)
+    if not gpu_fits(visible, biggest):
+        raise SystemExit(f"need one 80GB GPU or three smaller GPUs, saw {visible}")
     work = args.workdir
     meta = json.loads((work / "extract_meta.json").read_text(encoding="utf-8"))
     span = duration_us(float(meta["duration_s"]))

@@ -28,6 +28,6 @@ else
   "$PY" -m fuhe.extract --metadata "$META" --mcap "$MCAP" --workdir "$WORK"
 fi
 "$PY" -m fuhe.blocks --workdir "$WORK"
-"$FLORA_PY" -c 'import torch,sys; n=torch.cuda.device_count(); print("GPUS", n, flush=True); sys.exit(0 if n == 3 else 1)'
+"$FLORA_PY" -c 'import torch,sys; n=torch.cuda.device_count(); biggest=max((torch.cuda.get_device_properties(i).total_memory for i in range(n)), default=0); ok=n>=1 and (biggest>=80*1024**3 or n==3); print("GPUS", n, "biggest_gib", round(biggest/1024**3,1), flush=True); sys.exit(0 if ok else 1)'
 "$FLORA_PY" -m fuhe.chain --workdir "$WORK"
 "$PY" -m fuhe.postprocess --workdir "$WORK" --out "$OUT"
