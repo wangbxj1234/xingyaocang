@@ -29,7 +29,7 @@ def _camera_frame_cls(mcap_path: Path):
     return message_factory.GetMessageClass(pool.FindMessageTypeByName("qrdf.v0.CameraFrame"))
 
 
-def iter_rgb(mcap_path: Path, topic: str, *, epoch_ns: int, start_s: float, end_s: float):
+def _iter_cam(mcap_path: Path, topic: str, *, epoch_ns: int, start_s: float, end_s: float):
     path = Path(mcap_path)
     CameraFrame = _camera_frame_cls(path)
     kwargs = {
@@ -46,4 +46,14 @@ def iter_rgb(mcap_path: Path, topic: str, *, epoch_ns: int, start_s: float, end_
             t_s = (int(cam.header.timestamp_ns) - epoch_ns) / 1e9
             if t_s < start_s or t_s > end_s:
                 continue
-            yield t_s, Image.open(io.BytesIO(cam.data)).convert("RGB")
+            yield t_s, cam
+
+
+def iter_rgb(mcap_path: Path, topic: str, *, epoch_ns: int, start_s: float, end_s: float):
+    for t_s, cam in _iter_cam(mcap_path, topic, epoch_ns=epoch_ns, start_s=start_s, end_s=end_s):
+        yield t_s, Image.open(io.BytesIO(cam.data)).convert("RGB")
+
+
+def iter_jpeg(mcap_path: Path, topic: str, *, epoch_ns: int, start_s: float, end_s: float):
+    for t_s, cam in _iter_cam(mcap_path, topic, epoch_ns=epoch_ns, start_s=start_s, end_s=end_s):
+        yield t_s, bytes(cam.data)
