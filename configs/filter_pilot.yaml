@@ -55,7 +55,7 @@ workers: 2
 annotation:
   target_windows: 500
 
-# 人手。不用人体框。看不到手，或手还在但画面不动，超过 5 秒都标无效。
+# 人手。不用人体框。每秒 1 帧。看不到手，或手还在但画面不动，超过 5 秒的整段都标无效。
 presence:
   enabled: true
   detector: mediapipe_hands
@@ -68,10 +68,10 @@ presence:
     - [1.0, 0.0]
     - [1.0, 1.0]
     - [0.0, 1.0]
-  sample_interval_s: 5
+  sample_interval_s: 1
   absence_confirm_s: 5
   motion_low: 0.02
   boundary_context_s: 0
-  refine_fps: 1
+  refine_fps: 0
   refine_radius_s: 8
-  bridge_s: 5
+  bridge_s: 1

@@ -41,6 +41,23 @@ class HandIdleTest(unittest.TestCase):
         rows = [sample(0, False)]
         self.assertEqual(idle_intervals(rows, 30, _cfg()), [])
 
+    def test_one_second_grid_marks_five_seconds(self):
+        cfg = dict(_cfg())
+        cfg["sample_interval_s"] = 1
+        cfg["bridge_s"] = 1
+        short = [sample(float(t), False, motion=0.2) for t in range(4)]
+        self.assertEqual(idle_intervals(short, 30, cfg), [])
+        long = [sample(float(t), False, motion=0.2) for t in range(5)]
+        found = idle_intervals(long, 30, cfg)
+        self.assertEqual(len(found), 1)
+        self.assertAlmostEqual(found[0]["start"], 0.0)
+        self.assertAlmostEqual(found[0]["end"], 5.0)
+        rows = [sample(float(t), False, motion=0.2) for t in range(16)]
+        rows[6]["hand_present_in_work_area"] = True
+        rows[7]["hand_present_in_work_area"] = True
+        found = idle_intervals(rows, 30, cfg)
+        self.assertEqual([round(row["start"]) for row in found], [0, 8])
+
     def test_five_seconds_without_a_hand_is_idle(self):
         rows = [sample(t, False, motion=0.2) for t in (0, 5)]
         found = idle_intervals(rows, 30, _cfg())

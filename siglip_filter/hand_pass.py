@@ -62,7 +62,7 @@ def _observe(image, detector: HandDetector, motion: MotionRoi, polygon: list, mi
 
 def _refine(episode, coarse: list[dict], detector, polygon, min_overlap, radius: float, fps: float) -> list[dict]:
     if fps <= 0 or not coarse:
-        return coarse
+        return coarse, {}
     step = 1.0 / fps
     wanted = []
     for row in coarse:
