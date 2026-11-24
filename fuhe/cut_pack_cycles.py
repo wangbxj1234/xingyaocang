@@ -58,16 +58,26 @@ def main(argv: list[str] | None = None) -> None:
     src_dir.mkdir(parents=True, exist_ok=True)
     done = 0
 
+    def ready(row) -> bool:
+        dest = out / row["video"]
+        if not (dest.exists() and dest.stat().st_size > 0):
+            return False
+        got = probe(dest)
+        if abs(got - row["duration_s"]) > 0.75:
+            return False
+        return True
+
     def one(job):
         (folder, name), items = job
+        pending = [row for row in items if not ready(row)]
+        if not pending:
+            return name, len(items)
         local = src_dir / f"{items[0]['episode_id']}_{name}"
         subprocess.run(OSS + ["cp", "-f", folder + "/" + name, str(local)], check=True, capture_output=True)
         try:
-            for row in items:
-                dest = out / row["video"]
-                if not (dest.exists() and dest.stat().st_size > 0):
-                    cut(local, dest, row["mp4_start_s"], row["mp4_end_s"])
-                got = probe(dest)
+            for row in pending:
+                cut(local, out / row["video"], row["mp4_start_s"], row["mp4_end_s"])
+                got = probe(out / row["video"])
                 if abs(got - row["duration_s"]) > 0.75:
                     raise RuntimeError(f"{row['id']} duration {got:.2f} != {row['duration_s']:.2f}")
         finally:
