@@ -1,6 +1,6 @@
 import unittest
 
-from siglip_filter.cut_keep import kept_ranges, segment_record
+from siglip_filter.cut_keep import kept_ranges, needs_rot180, segment_record
 
 
 class CutKeepTest(unittest.TestCase):
@@ -23,6 +23,36 @@ class CutKeepTest(unittest.TestCase):
         self.assertEqual(rows[1]["src_start"], 8.0)
         self.assertNotIn("dst_start", rows[0])
         self.assertNotIn("dst_end", rows[1])
+
+    def _hand(self, t, y0, y1, present=True, height=720):
+        return {
+            "timestamp_s": t,
+            "hand_present_in_work_area": present,
+            "hand_bbox": [0, y0, 10, y1],
+            "image_height": height,
+        }
+
+    def test_top_edge_turns_the_episode(self):
+        samples = [self._hand(i, 10, 200) for i in range(5)]
+        self.assertTrue(needs_rot180(samples))
+
+    def test_bottom_edge_stays(self):
+        samples = [self._hand(i, 400, 700) for i in range(8)]
+        self.assertFalse(needs_rot180(samples))
+
+    def test_top_must_outnumber_bottom_and_reach_five(self):
+        mixed = [self._hand(i, 10, 200) for i in range(5)]
+        mixed += [self._hand(i, 400, 700) for i in range(5, 10)]
+        self.assertFalse(needs_rot180(mixed))
+        self.assertFalse(needs_rot180([self._hand(i, 10, 200) for i in range(4)]))
+
+    def test_later_than_three_minutes_does_not_vote(self):
+        late = [self._hand(180 + i, 10, 200) for i in range(6)]
+        self.assertFalse(needs_rot180(late))
+
+    def test_box_touching_both_edges_does_not_vote(self):
+        samples = [self._hand(i, 10, 700) for i in range(6)]
+        self.assertFalse(needs_rot180(samples))
 
 
 if __name__ == "__main__":

@@ -18,6 +18,35 @@ WRITE_CFG = "/dev/shm/ossutilconfig-research"
 DEST_ROOT = "oss://quic-research/wbx/data/fuhe_kept"
 
 
+ORIENT_WINDOW_S = 180.0
+ORIENT_EDGE = 0.15
+ORIENT_MIN_TOP = 5
+
+
+def needs_rot180(samples: list[dict]) -> bool:
+    """开头 3 分钟里，手框贴上沿的帧多于贴下沿，并且上沿至少 5 帧，整段转 180°。"""
+    top = 0
+    bottom = 0
+    for row in samples:
+        if float(row.get("timestamp_s") or 0.0) >= ORIENT_WINDOW_S:
+            continue
+        if not row.get("hand_present_in_work_area"):
+            continue
+        bbox = row.get("hand_bbox")
+        height = float(row.get("image_height") or 0.0)
+        if not bbox or height <= 0:
+            continue
+        y0 = float(bbox[1]) / height
+        y1 = float(bbox[3]) / height
+        at_top = y0 <= ORIENT_EDGE
+        at_bottom = y1 >= 1.0 - ORIENT_EDGE
+        if at_top and not at_bottom:
+            top += 1
+        elif at_bottom and not at_top:
+            bottom += 1
+    return top >= ORIENT_MIN_TOP and top > bottom
+
+
 def kept_ranges(intervals: list[dict], duration: float) -> list[tuple[float, float]]:
     """Time still in the episode after the invalid spans are removed."""
     if duration <= 0:
@@ -81,6 +110,7 @@ def detect_intervals(cfg, episode: dict) -> tuple[list[dict], list[dict]]:
             observed = detector.detect(image, polygon, float(presence.get("min_overlap", 0.2)))
             observed.update(motion.measure(image))
             observed["timestamp_s"] = float(stamp)
+            observed["image_height"] = int(image.size[1])
             samples.append(observed)
             if len(samples) % 60 == 0:
                 print("CUT sample %.0fs %s" % (stamp, episode["episode_id"]), flush=True)
@@ -107,6 +137,18 @@ def _infer_fps(times: list[float]) -> float:
         if abs(guess - candidate) < 1.5:
             return candidate
     return float(max(1, round(guess)))
+
+
+def rotate_jpeg_180(blob: bytes) -> bytes:
+    import io
+
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(blob))
+    turned = image.transpose(Image.ROTATE_180)
+    out = io.BytesIO()
+    turned.save(out, format="JPEG", quality=95)
+    return out.getvalue()
 
 
 def _ffmpeg(fps: float, out_path: Path) -> subprocess.Popen:
@@ -174,7 +216,12 @@ def _finish_segment(writer: dict, fps: float) -> tuple[dict | None, float]:
     return segment_record(writer["seg"], writer["src_start"], writer["src_end"], writer["frames"], fps), fps
 
 
-def write_segments(episode: dict, ranges: list[tuple[float, float]], out_dir: Path) -> tuple[list[dict], float]:
+def write_segments(
+    episode: dict,
+    ranges: list[tuple[float, float]],
+    out_dir: Path,
+    rot180: bool = False,
+) -> tuple[list[dict], float]:
     """Write one mp4 per kept range. Ranges are not concatenated."""
     from fuhe.mcap_rgb import iter_jpeg
 
@@ -209,6 +256,8 @@ def write_segments(episode: dict, ranges: list[tuple[float, float]], out_dir: Pa
     def push(blob: bytes, stamp: float) -> None:
         nonlocal fps, writer
         assert writer is not None
+        if rot180:
+            blob = rotate_jpeg_180(blob)
         if fps <= 0:
             writer["pending"].append(blob)
             writer["times"].append(stamp)
@@ -299,8 +348,9 @@ def process_episode(cfg, episode: dict, work: Path) -> dict:
     episode["video_path"] = str(local_mcap)
     try:
         _samples, intervals = detect_intervals(cfg, episode)
+        rot180 = needs_rot180(_samples)
         ranges = kept_ranges(intervals, float(episode["duration"]))
-        segments, fps = write_segments(episode, ranges, work)
+        segments, fps = write_segments(episode, ranges, work, rot180=rot180)
         kept_s = sum(float(row["duration_s"]) for row in segments)
         frames = sum(int(row["frames"]) for row in segments)
         payload = {
@@ -312,6 +362,7 @@ def process_episode(cfg, episode: dict, work: Path) -> dict:
             "src_duration_s": float(episode["duration"]),
             "kept_duration_s": kept_s,
             "frames": frames,
+            "rotated_180": rot180,
             "segments": segments,
             "invalid": [
                 {
@@ -338,14 +389,15 @@ def process_episode(cfg, episode: dict, work: Path) -> dict:
                     "layout": "segments",
                     "segments": len(segments),
                     "frames": frames,
+                    "rotated_180": rot180,
                 }
             ),
             encoding="utf-8",
         )
         upload(done, folder + "/done.json")
         print(
-            "CUT done %s segs %d kept %.0fs invalid %d wall %.0fs"
-            % (episode["episode_id"], len(segments), kept_s, len(intervals), payload["wall_s"]),
+            "CUT done %s segs %d kept %.0fs invalid %d rot180 %d wall %.0fs"
+            % (episode["episode_id"], len(segments), kept_s, len(intervals), int(rot180), payload["wall_s"]),
             flush=True,
         )
         return payload
