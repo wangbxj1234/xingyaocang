@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 import zlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from siglip_filter.cut_keep import DEST_ROOT, upload
@@ -20,6 +21,7 @@ OSS = "/dev/shm/bin/ossutil"
 WRITE_CFG = "/dev/shm/ossutilconfig-research"
 FLORA_PY = os.environ.get("FLORA_PY", "/mnt/cpfs/zhongjiayu0757/flora/venv312/bin/python")
 PY = os.environ.get("PY", "python3")
+CATALOG_MAX_AGE_S = 90
 
 
 def oss(cfg: str, args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -70,35 +72,156 @@ def choose_segment(rows: list[dict], shard: int = 0, shards: int = 1) -> dict | 
         pending.append(row)
     if not pending:
         return None
-    return min(pending, key=lambda row: (float(row["duration_s"]), row["episode_id"], int(row["seg"])))
+    return max(pending, key=lambda row: (float(row["duration_s"]), row["episode_id"], int(row["seg"])))
+
+
+def names_from_ls(text: str) -> set[str]:
+    names = set()
+    for line in text.splitlines():
+        url = ""
+        for token in line.split():
+            if token.startswith("oss://"):
+                url = token
+        if not url or url.endswith("/"):
+            continue
+        names.add(url.rsplit("/", 1)[-1])
+    return names
+
+
+def list_object_names(folder: str) -> set[str]:
+    marker = ""
+    names: set[str] = set()
+    while True:
+        args = ["ls", folder + "/", "--limited-num", "1000"]
+        if marker:
+            args += ["--marker", marker]
+        result = oss(WRITE_CFG, args)
+        names.update(names_from_ls(result.stdout))
+        next_marker = ""
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("NextMarker:"):
+                next_marker = stripped.split(":", 1)[1].strip()
+        if not next_marker or next_marker == marker:
+            return names
+        marker = next_marker
+
+
+def rows_from_listing(episode_id: str, folder: str, spans: dict, names: set[str]) -> list[dict]:
+    rows = []
+    for seg in spans.get("segments") or []:
+        name = str(seg["file"])
+        stem = name[:-4] if name.endswith(".mp4") else name
+        rows.append({
+            "episode_id": episode_id,
+            "folder": folder,
+            "seg": int(seg["seg"]),
+            "file": name,
+            "stem": stem,
+            "src_start": float(seg["src_start"]),
+            "src_end": float(seg["src_end"]),
+            "frames": int(seg.get("frames") or 0),
+            "duration_s": float(seg.get("duration_s") or 0),
+            "fps": float(spans.get("fps") or 0),
+            "rotated_180": bool(spans.get("rotated_180")),
+            "annotated": (stem + ".json") in names,
+            "failed": (stem + ".flora_error.json") in names,
+        })
+    return rows
+
+
+def _episode_rows(folder: str) -> list[dict]:
+    episode_id = folder.rsplit("/", 1)[-1]
+    try:
+        names = list_object_names(folder)
+        if "done.json" not in names or "spans.json" not in names:
+            return []
+        done = oss(WRITE_CFG, ["cat", folder + "/done.json"], check=False)
+        if done.returncode != 0 or '"layout": "segments"' not in done.stdout:
+            return []
+        spans = parse_oss_json(oss(WRITE_CFG, ["cat", folder + "/spans.json"]).stdout)
+        return rows_from_listing(episode_id, folder, spans, names)
+    except Exception as exc:
+        print("FLORA_LIST_FAIL %s %s: %s" % (episode_id, type(exc).__name__, exc), flush=True)
+        return []
 
 
 def pending_segments() -> list[dict]:
-    rows = []
-    for folder in list_episode_dirs():
-        episode_id = folder.rsplit("/", 1)[-1]
-        done = oss(WRITE_CFG, ["cat", folder + "/done.json"], check=False)
-        if done.returncode != 0 or '"layout": "segments"' not in done.stdout:
-            continue
-        spans = parse_oss_json(oss(WRITE_CFG, ["cat", folder + "/spans.json"]).stdout)
-        for seg in spans.get("segments") or []:
-            name = str(seg["file"])
-            stem = name[:-4] if name.endswith(".mp4") else name
-            rows.append({
-                "episode_id": episode_id,
-                "folder": folder,
-                "seg": int(seg["seg"]),
-                "file": name,
-                "stem": stem,
-                "src_start": float(seg["src_start"]),
-                "src_end": float(seg["src_end"]),
-                "frames": int(seg.get("frames") or 0),
-                "duration_s": float(seg.get("duration_s") or 0),
-                "fps": float(spans.get("fps") or 0),
-                "annotated": object_exists(folder + "/" + stem + ".json"),
-                "failed": object_exists(folder + "/" + stem + ".flora_error.json"),
-            })
+    folders = list_episode_dirs()
+    started = time.time()
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_episode_rows, folder) for folder in folders]
+        for future in as_completed(futures):
+            rows.extend(future.result())
+    annotated = sum(1 for row in rows if row["annotated"])
+    print(
+        "FLORA_CATALOG episodes %d segments %d annotated %d %.0fs"
+        % (len(folders), len(rows), annotated, time.time() - started),
+        flush=True,
+    )
     return rows
+
+
+def _read_catalog(path: Path) -> list[dict] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        age = time.time() - float(payload.get("built_at") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    rows = payload.get("rows") if age < CATALOG_MAX_AGE_S else None
+    return rows if isinstance(rows, list) else None
+
+
+def _write_catalog(path: Path, rows: list[dict], built_at: float | None = None) -> None:
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps({"built_at": time.time() if built_at is None else built_at, "rows": rows}),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def load_catalog(path: Path) -> list[dict]:
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(".lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        fresh = _read_catalog(path) if path.is_file() else None
+        if fresh is not None:
+            return fresh
+        print("FLORA_CATALOG_BUILD", flush=True)
+        rows = pending_segments()
+        _write_catalog(path, rows)
+        return rows
+
+
+def mark_catalog(path: Path, episode_id: str, seg: int, *, failed: bool) -> None:
+    import fcntl
+
+    if not path.is_file():
+        return
+    lock_path = path.with_suffix(".lock")
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        for row in payload.get("rows") or []:
+            if row.get("episode_id") == episode_id and int(row.get("seg")) == seg:
+                if failed:
+                    row["failed"] = True
+                else:
+                    row["annotated"] = True
+        built_at = payload.get("built_at")
+        _write_catalog(
+            path,
+            payload.get("rows") or [],
+            float(built_at) if isinstance(built_at, (int, float)) else None,
+        )
 
 
 def _ffprobe(path: Path) -> dict:
@@ -157,7 +280,7 @@ def write_frames(mp4: Path, work: Path, job: dict) -> dict:
     span_start = float(job["src_start"])
     span_end = span_start + duration_s
     meta = {
-        "rotated_180": False,
+        "rotated_180": False,  # 成片已经转过。blocks 看到 true 会再翻一次。
         "source_frames": src_count,
         "slots": src_count,
         "fps": 15,
@@ -229,6 +352,7 @@ def annotate_one(job: dict, work: Path) -> dict:
             "src_end": job["src_end"],
             "timeline_start_s": meta["span_s"][0],
             "timeline_end_s": meta["span_s"][1],
+            "rotated_180": bool(job.get("rotated_180")),
         })
         dest = work / (job["stem"] + ".json")
         dest.write_text(json.dumps(posted, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -263,8 +387,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
     assert_gpus()
+    catalog = Path(args.work).resolve().parent / "catalog.json"
     while True:
-        job = choose_segment(pending_segments(), args.shard, args.shards)
+        job = choose_segment(load_catalog(catalog), args.shard, args.shards)
         if job is None:
             print("FLORA_WAIT", flush=True)
             if args.once:
@@ -281,6 +406,10 @@ def main(argv: list[str] | None = None) -> None:
                 "FLORA_DONE %s %s segments %d" % (job["episode_id"], job["file"], len(posted["segments"])),
                 flush=True,
             )
+            try:
+                mark_catalog(catalog, job["episode_id"], int(job["seg"]), failed=False)
+            except Exception as mark_error:
+                print("FLORA_CATALOG_MARK %s" % mark_error, flush=True)
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             print("FLORA_FAIL %s %s %s" % (job["episode_id"], job["file"], message), flush=True)
@@ -289,6 +418,10 @@ def main(argv: list[str] | None = None) -> None:
             except Exception as upload_error:
                 print("FLORA_FAIL_UPLOAD %s %s" % (job["episode_id"], upload_error), flush=True)
                 raise
+            try:
+                mark_catalog(catalog, job["episode_id"], int(job["seg"]), failed=True)
+            except Exception as mark_error:
+                print("FLORA_CATALOG_MARK %s" % mark_error, flush=True)
         if args.once:
             return
 
