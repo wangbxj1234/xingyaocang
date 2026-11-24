@@ -1,7 +1,7 @@
 import unittest
 
 from fuhe.chain_math import blocks, chain, duration_us, frame_window, managed
-from fuhe.postprocess import assert_covers, map_segments
+from fuhe.postprocess import assert_covers, drop_device_segments, map_segments
 from fuhe.preprocess import keep_spans
 
 
@@ -36,6 +36,29 @@ class ChainMath(unittest.TestCase):
         assert_covers(rows, 10.0, 14.0)
         self.assertEqual(rows[1]["status"], "gap")
         self.assertEqual(rows[1]["caption"], "")
+
+    def test_drop_computer_mouse_phone(self):
+        rows = [
+            {"start_s": 0.0, "end_s": 1.0, "caption": "pick up blue bag with right hand", "status": "complete"},
+            {"start_s": 1.0, "end_s": 2.0, "caption": "press the keys on the keyboard with the left hand", "status": "complete"},
+            {"start_s": 2.0, "end_s": 3.0, "caption": "hold mouse with right hand", "status": "complete"},
+            {"start_s": 3.0, "end_s": 4.0, "caption": "hold the mobile device with the right hand", "status": "complete"},
+            {"start_s": 4.0, "end_s": 5.0, "caption": "place phone on stack of blue bags with left hand", "status": "complete"},
+            {"start_s": 5.0, "end_s": 6.0, "caption": "place scanner on table with right hand", "status": "complete"},
+            {"start_s": 6.0, "end_s": 7.0, "caption": "", "status": "gap"},
+        ]
+        kept, dropped = drop_device_segments(rows)
+        self.assertEqual([row["caption"] for row in kept], [
+            "pick up blue bag with right hand",
+            "place scanner on table with right hand",
+            "",
+        ])
+        self.assertEqual([row["drop"] for row in dropped], [
+            ["computer"],
+            ["mouse"],
+            ["phone"],
+            ["phone"],
+        ])
 
 
 if __name__ == "__main__":
