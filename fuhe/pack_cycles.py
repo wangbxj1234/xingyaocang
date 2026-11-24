@@ -9,6 +9,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 OSS = ["/dev/shm/bin/ossutil", "-c", "/dev/shm/ossutilconfig-research"]
+PICK = re.compile(r"\bpick(?:s|ing)? up\b|\bgrab(?:s|bing)?\b|\btake(?:s|ing)?\b", re.I)
+INNER = re.compile(
+    r"plastic|clear|shirt|garment|cloth|apparel|packaged\s+\w+|\bitem\b|\bproduct\b|\bgoods\b|\btoy\b|\bbox\b",
+    re.I,
+)
 
 
 def bits(caption: str) -> tuple[bool, bool, bool]:
@@ -18,6 +23,33 @@ def bits(caption: str) -> tuple[bool, bool, bool]:
     pack = bool(re.search(r"\binsert\b", text) and re.search(r"bag|bubble|box|container|wrap", text))
     pack = pack or bool(re.search(r"\btape\b", text))
     return scan, label, pack
+
+
+def starts_this_order(caption: str) -> bool:
+    """这一句是不是已经在拿这一单。只收上一单的句子返回假。"""
+    text = caption.lower()
+    if re.search(r"\bscans?\b|\bscanning\b", text):
+        return True
+    if re.search(r"\binsert\b", text) and re.search(r"bag|bubble|box|container|wrap", text):
+        return True
+    for clause in re.split(r",|\band\b", caption):
+        part = clause.strip().lower()
+        if not PICK.search(part):
+            continue
+        if re.search(r"\blabels?\b|\bscanner\b|\bbarcode\b", part):
+            continue
+        if INNER.search(part):
+            return True
+    return False
+
+
+def this_order(window: list[dict], label_row: dict) -> list[dict]:
+    for index, row in enumerate(window):
+        if row is label_row:
+            return window[index:]
+        if starts_this_order(row["caption"]):
+            return window[index:]
+    return window
 
 
 def cycles_of(data: dict) -> list[dict]:
@@ -46,14 +78,21 @@ def cycles_of(data: dict) -> list[dict]:
     found = []
     prev = 0.0
     for end_t in merged:
-        span = end_t - prev
         window = [row for row in rows if prev <= row["clock"] <= end_t]
-        if 3 <= span <= 90 and any(row["scan"] for row in window) and any(row["pack"] for row in window):
-            label_row = next(row for row in window if row["label"] and row["clock"] == end_t)
-            clip_src_start = window[0]["start_s"]
+        label_row = next((row for row in window if row["label"] and row["clock"] == end_t), None)
+        kept = this_order(window, label_row) if label_row is not None else []
+        span = (label_row["clock"] - kept[0]["clock"]) if kept else 0.0
+        if (
+            label_row is not None
+            and kept
+            and 3 <= span <= 90
+            and any(row["scan"] for row in kept)
+            and any(row["pack"] for row in kept)
+        ):
+            clip_src_start = kept[0]["start_s"]
             clip_src_end = label_row["end_s"]
             captions = []
-            for row in window:
+            for row in kept:
                 if row["end_s"] <= clip_src_start or row["start_s"] >= clip_src_end:
                     continue
                 captions.append({
