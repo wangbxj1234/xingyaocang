@@ -182,20 +182,29 @@ def _write_catalog(path: Path, rows: list[dict], built_at: float | None = None) 
     tmp.replace(path)
 
 
-def load_catalog(path: Path) -> list[dict]:
+def load_catalog(path: Path, *, fresh: bool = False) -> list[dict]:
     import fcntl
 
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(".lock")
     with lock_path.open("a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        fresh = _read_catalog(path) if path.is_file() else None
-        if fresh is not None:
-            return fresh
+        cached = None if fresh else (_read_catalog(path) if path.is_file() else None)
+        if cached is not None:
+            return cached
         print("FLORA_CATALOG_BUILD", flush=True)
         rows = pending_segments()
         _write_catalog(path, rows)
         return rows
+
+
+def after_idle(confirmed_empty: bool, *, drain: bool, once: bool) -> str:
+    """队列空了之后：exit 结束，rebuild 丢掉缓存再看一次，wait 过一分钟再看。"""
+    if drain:
+        return "exit" if confirmed_empty else "rebuild"
+    if once:
+        return "exit"
+    return "wait"
 
 
 def mark_catalog(path: Path, episode_id: str, seg: int, *, failed: bool) -> None:
@@ -385,17 +394,27 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--drain", action="store_true")
     args = parser.parse_args(argv)
     assert_gpus()
     catalog = Path(args.work).resolve().parent / "catalog.json"
+    confirmed_empty = False
     while True:
-        job = choose_segment(load_catalog(catalog), args.shard, args.shards)
+        job = choose_segment(
+            load_catalog(catalog, fresh=confirmed_empty), args.shard, args.shards
+        )
         if job is None:
-            print("FLORA_WAIT", flush=True)
-            if args.once:
+            action = after_idle(confirmed_empty, drain=args.drain, once=args.once)
+            if action == "exit":
+                print("FLORA_DRAIN" if args.drain else "FLORA_WAIT", flush=True)
                 return
+            if action == "rebuild":
+                confirmed_empty = True
+                continue
+            print("FLORA_WAIT", flush=True)
             time.sleep(60)
             continue
+        confirmed_empty = False
         print(
             "FLORA_PICK %s %s %.1fs" % (job["episode_id"], job["file"], job["duration_s"]),
             flush=True,

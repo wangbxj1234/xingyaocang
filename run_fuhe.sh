@@ -1,5 +1,5 @@
 #!/bin/bash
-# 一条复核包装发货：预处理（现在不删）→ 抽帧切块 → Flora 收链 → 映回原时间。
+# 一条整段 mcap：抽帧切块 → Flora 收链 → 映回原时间。不去无效片段。全套走 run_fuhe_kept.sh。
 # 抽帧、切块、后处理用普通 python3。只有收链用 Flora 的解释器。
 # CUDA_VISIBLE_DEVICES 必须是 3 张卡。画面要转 180° 时加 ROT180=1，编码时才 hflip,vflip。
 set -eu

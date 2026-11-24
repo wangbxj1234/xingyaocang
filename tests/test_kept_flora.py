@@ -1,7 +1,7 @@
 import unittest
 
 from fuhe.chain import gpu_fits
-from fuhe.kept_flora import choose_segment, names_from_ls, parse_oss_json, rows_from_listing
+from fuhe.kept_flora import after_idle, choose_segment, names_from_ls, parse_oss_json, rows_from_listing
 
 
 class KeptFloraTest(unittest.TestCase):
@@ -41,6 +41,12 @@ class KeptFloraTest(unittest.TestCase):
         self.assertFalse(by_seg[6]["annotated"])
         self.assertTrue(by_seg[6]["failed"])
         self.assertFalse(by_seg[5]["rotated_180"])
+
+    def test_drain_rebuilds_once_before_it_exits(self):
+        self.assertEqual(after_idle(False, drain=True, once=False), "rebuild")
+        self.assertEqual(after_idle(True, drain=True, once=False), "exit")
+        self.assertEqual(after_idle(False, drain=False, once=True), "exit")
+        self.assertEqual(after_idle(False, drain=False, once=False), "wait")
 
     def test_one_h20_is_enough_and_three_small_cards_still_are(self):
         self.assertTrue(gpu_fits(1, 96 * 1024 ** 3))

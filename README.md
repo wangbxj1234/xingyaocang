@@ -1,6 +1,6 @@
 # 兴遥仓库时长
 
-时长表以本文件为准。复核包装发货的处理管线在 `复核包装发货.md`，代码在 `fuhe/`，入口是 `run_fuhe.sh`。
+时长表以本文件为准。复核包装发货的处理管线在 `复核包装发货.md`，代码在 `fuhe/` 和 `siglip_filter/cut_keep.py`，入口是 `run_fuhe_kept.sh`。
 
 统计日 2026-11-22。只算 `recording_status=complete` 的 `timing.duration_s`。v1 和 v2 的 `episode_id` 不重复。
 
